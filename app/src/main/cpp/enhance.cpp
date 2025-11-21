@@ -292,6 +292,15 @@ void separableGaussianBlur(const Mat& src, Mat& dst, double sigma) {
 	sepFilter2D(src, dst, -1, kernel, kernel);
 }
 
+Mat grayWorldBalance(const Mat& channel) {
+    Scalar meanVal = mean(channel);
+    double avg = (meanVal[0] + meanVal[1] + meanVal[2]) / 3.0;
+
+    Mat balanced = channel * (avg / meanVal[0]);
+    threshold(balanced, balanced, 255.0, 255.0, THRESH_TRUNC);
+    return balanced;
+}
+
 // 多尺度 Retinex
 Mat MSR(const Mat& img, const vector<double>& scales) {
 	Mat logImg;
@@ -311,39 +320,56 @@ Mat MSR(const Mat& img, const vector<double>& scales) {
 
 // MSRCR 主函数
 void MSRCR(Mat& inputImage, double dynamic = 4.0, double alpha = 20.0, double beta = 12.0) {
-	Mat rgbImage;
-	cvtColor(inputImage, rgbImage, COLOR_BGR2RGB);
-	rgbImage.convertTo(rgbImage, CV_32FC3);  // 统一转 float
+    Mat rgbImage;
+    cvtColor(inputImage, rgbImage, COLOR_BGR2RGB);
+    rgbImage.convertTo(rgbImage, CV_32FC3);  // 统一转 float
 
-	vector<Mat> rgbChannels(3);
-	split(rgbImage, rgbChannels);
-	vector<double> scales = {10, 20};
+    vector<Mat> rgbChannels(3);
+    split(rgbImage, rgbChannels);
+    vector<double> scales = {10, 20};
 
-	parallel_for_(Range(0, 3), [&](const Range& range) {
-		for (int ch = range.start; ch < range.end; ++ch) {
-			Mat& channel = rgbChannels[ch];
-			channel = replaceZeroes(channel);
+    // 计算原始图像的色彩信息
+    vector<Mat> originalChannels(3);
+    split(rgbImage.clone(), originalChannels);
 
-			Mat retinexChannel = MSR(channel, scales);
+    parallel_for_(Range(0, 3), [&](const Range& range) {
+        for (int ch = range.start; ch < range.end; ++ch) {
+            Mat& channel = rgbChannels[ch];
+            Mat& originalChannel = originalChannels[ch];
+            channel = replaceZeroes(channel);
 
-			// Retinex 输出归一化（拉伸对比度）
-			Scalar meanVal, stdVal;
-			meanStdDev(retinexChannel, meanVal, stdVal);
+            Mat retinexChannel = MSR(channel, scales);
 
-			double minVal = meanVal[0] - dynamic * stdVal[0];
-			double maxVal = meanVal[0] + dynamic * stdVal[0];
-			double range = std::max(maxVal - minVal, 1e-6);
+            //灰度世界取30%
+            Mat grayWorldAdjusted = grayWorldBalance(originalChannel);
+            double weight = 0.3;
+            retinexChannel = weight * grayWorldAdjusted + (1.0 - weight) * retinexChannel;
 
-			retinexChannel = (retinexChannel - minVal) * (255.0 / range);
-			threshold(retinexChannel, retinexChannel, 255.0, 255.0, THRESH_TRUNC);
-			threshold(retinexChannel, retinexChannel, 0.0, 0.0, THRESH_TOZERO);
+            // Retinex 输出归一化（拉伸对比度）
+            Scalar meanVal, stdVal;
+            meanStdDev(retinexChannel, meanVal, stdVal);
 
-			retinexChannel.convertTo(channel, CV_8U);  // 转换回 uint8
-		}
-	});
+            double minVal = meanVal[0] - dynamic * stdVal[0];
+            double maxVal = meanVal[0] + dynamic * stdVal[0];
+            double range = std::max(maxVal - minVal, 1e-6);
 
-	merge(rgbChannels, rgbImage);
-	cvtColor(rgbImage, inputImage, COLOR_RGB2BGR);  // 转回 BGR
+            retinexChannel = (retinexChannel - minVal) * (255.0 / range);
+            threshold(retinexChannel, retinexChannel, 255.0, 255.0, THRESH_TRUNC);
+            threshold(retinexChannel, retinexChannel, 0.0, 0.0, THRESH_TOZERO);
+
+            retinexChannel.convertTo(channel, CV_8U);  // 转换回 uint8
+        }
+    });
+
+    merge(rgbChannels, rgbImage);
+	
+    Mat hsvImage;
+    cvtColor(rgbImage, hsvImage, COLOR_RGB2HSV);
+    vector<Mat> hsvChannels;
+    split(hsvImage, hsvChannels);
+
+    merge(hsvChannels, hsvImage);
+    cvtColor(hsvImage, inputImage, COLOR_HSV2BGR);
 }
 
 extern "C" {
